@@ -1,0 +1,30 @@
+# Weekly Digest Sources
+# Edit this file to add/remove sources
+
+substack:
+  - name: "Debora Marks Lab"
+    feed: "https://deboramarkslab.substack.com/feed"
+  - name: "Evgeny Kiner"
+    feed: "https://evgenykiner.substack.com/feed"
+  # - name: "Add Author Name"
+  #   feed: "https://authorname.substack.com/feed"
+
+youtube:
+  # Get channel ID: go to channel page → view-source → search "channelId"
+  # Or use https://www.youtube.com/@handle/about and check URL
+  #- name: "Channel Name Here"
+  #  channel_id: "UCxxxxxxxxxxxxxxxxxxxxxxxx"
+  # - name: "Another Channel"
+  #   channel_id: "UCxxxxxxxxxxxxxxxxxxxxxxxx"
+
+telegram:
+  # Public channel username (without @) OR numeric chat ID for private channels
+  # For private channels you must already be a member
+  #- name: "Channel Name"
+ #   username: "channel_username_here"
+  # - name: "Another Channel"
+  #   username: "another_channel"
+
+# How many days back to look for new content
+lookback_days: 7
+

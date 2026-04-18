@@ -1,0 +1,5 @@
+state/
+summaries/
+*.session*
+.env
+__pycache__/

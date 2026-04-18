@@ -1,0 +1,11 @@
+anthropic
+python-dotenv
+feedparser
+requests
+beautifulsoup4
+pyyaml
+lxml
+pdfplumber
+google-api-python-client
+youtube-transcript-api
+telethon
