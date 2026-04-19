@@ -319,9 +319,26 @@ def fetch_manual(inputs):
 
     return items
 
+def fetch_batch(folder):
+    """Process all .pdf/.txt/.md files in a folder."""
+    folder_path = Path(folder)
+    if not folder_path.is_dir():
+        print(f"  ✗ Not a directory: {folder}")
+        return []
+    files = sorted(
+        f for f in folder_path.iterdir()
+        if f.suffix in (".pdf", ".txt", ".md") and f.is_file()
+    )
+    if not files:
+        print(f"  ⚠ No .pdf/.txt/.md files found in {folder}")
+        return []
+    print(f"  Found {len(files)} file(s) in {folder}")
+    return fetch_manual([str(f) for f in files])
+
+
 # ── SUMMARIZER ────────────────────────────────────────────────────────────────
 
-def summarize(item, prompt_template):
+def summarize(item, prompt_template, model="claude-sonnet-4-6"):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     prompt = prompt_template.format(
         title=item["title"],
@@ -332,7 +349,7 @@ def summarize(item, prompt_template):
         content=item["content"],
     )
     message = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=model,
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -340,11 +357,13 @@ def summarize(item, prompt_template):
 
 
 def save_summary(item, text):
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    week_label = datetime.date.today().strftime("%Y-W%W")
+    week_dir = OUTPUT_DIR / week_label
+    week_dir.mkdir(parents=True, exist_ok=True)
     filename = safe_filename(item["title"], item["date"])
-    out_path = OUTPUT_DIR / filename
+    out_path = week_dir / filename
     out_path.write_text(text, encoding="utf-8")
-    print(f"    ✓ Saved: {filename}")
+    print(f"    ✓ Saved: {week_label}/{filename}")
     return out_path
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -359,9 +378,16 @@ def main():
                         help="Show what would be processed without calling the API")
     parser.add_argument("--reset-seen", action="store_true",
                         help="Clear seen-items state (will re-process everything)")
+    parser.add_argument("--batch", metavar="FOLDER",
+                        help="Process all .pdf/.txt/.md files in a folder")
+    parser.add_argument("--since", metavar="DATE",
+                        help="Fetch items published on or after this date (YYYY-MM-DD), overrides lookback_days")
+    parser.add_argument("--model", default="claude-sonnet-4-6",
+                        choices=["claude-haiku-4-5-20251001", "claude-sonnet-4-6"],
+                        help="Claude model to use (default: sonnet)")
     args = parser.parse_args()
 
-    if not args.auto and not args.manual:
+    if not args.auto and not args.manual and not args.batch:
         parser.print_help()
         sys.exit(0)
 
@@ -373,7 +399,17 @@ def main():
     prompt  = load_prompt()
     state   = load_state()
     items   = []
-    lookback = config.get("lookback_days", 8)
+
+    if args.since:
+        try:
+            since_date = datetime.date.fromisoformat(args.since)
+        except ValueError:
+            print(f"✗ Invalid --since date '{args.since}'. Use YYYY-MM-DD format.")
+            sys.exit(1)
+        lookback = (datetime.date.today() - since_date).days
+        print(f"  Using --since {args.since} ({lookback} days lookback)")
+    else:
+        lookback = config.get("lookback_days", 8)
 
     if args.auto:
         print("\n── Auto sources ──────────────────────────────────────")
@@ -387,6 +423,10 @@ def main():
     if args.manual:
         print("\n── Manual inputs ─────────────────────────────────────")
         items += fetch_manual(args.manual)
+
+    if args.batch:
+        print(f"\n── Batch folder: {args.batch} ────────────────────────")
+        items += fetch_batch(args.batch)
 
     if not items:
         print("\nNothing new to summarize.")
@@ -402,7 +442,7 @@ def main():
     for item in items:
         print(f"  → {item['title'][:70]}")
         try:
-            summary = summarize(item, prompt)
+            summary = summarize(item, prompt, args.model)
             path = save_summary(item, summary)
             saved_paths.append(path)
             mark_seen(state, item["uid"])

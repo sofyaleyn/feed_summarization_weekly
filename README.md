@@ -165,14 +165,22 @@ python weekly_digest.py --auto --reset-seen
 
 ---
 
-## Batch folder plan (LinkedIn and manual content)
+## Batch folder (`--batch`)
 
-**Status: planned — not yet in the script. Implementation notes are here when you're ready.**
+Drop all LinkedIn PDFs/txts/mds for the week into a folder, run `--batch` once.
 
-### Idea
-Drop all LinkedIn PDFs/txts for the week into a folder, run `--batch` once.
+```bash
+# Process all .pdf/.txt/.md files in a folder
+python weekly_digest.py --batch inbox/2025-W16/
 
-### Suggested folder structure
+# Combine with auto sources in one run
+python weekly_digest.py --auto --batch inbox/2025-W16/
+
+# Preview without calling the API
+python weekly_digest.py --batch inbox/2025-W16/ --dry-run
+```
+
+Suggested folder structure:
 ```
 weekly_digest/
 └── inbox/
@@ -183,29 +191,26 @@ weekly_digest/
     └── 2025-W17/
 ```
 
-### To add `--batch` to the script
+Files already processed are tracked in `state/seen.json` by file path — re-running the same folder won't reprocess them unless you use `--reset-seen`.
 
-**Step 1** — add the argument (in the `argparse` block):
-```python
-parser.add_argument("--batch", metavar="FOLDER",
-                    help="Process all .pdf/.txt/.md files in a folder")
+---
+
+## Catch-up runs (`--since DATE`)
+
+Override `lookback_days` from `sources.yaml` with an explicit start date. Useful after a holiday or gap.
+
+```bash
+# Fetch everything published since April 1st
+python weekly_digest.py --auto --since 2026-04-01
+
+# Full catch-up from the start of the year
+python weekly_digest.py --auto --since 2026-01-01
+
+# Preview what would be fetched
+python weekly_digest.py --auto --since 2026-04-01 --dry-run
 ```
 
-**Step 2** — add the handler (after the `args.manual` block):
-```python
-if args.batch:
-    folder = Path(args.batch)
-    batch_files = (list(folder.glob("*.pdf")) +
-                   list(folder.glob("*.txt")) +
-                   list(folder.glob("*.md")))
-    if not batch_files:
-        print(f"No processable files found in {folder}")
-    else:
-        print(f"\n── Batch folder: {folder} ({len(batch_files)} files) ──")
-        items += fetch_manual([str(f) for f in batch_files])
-```
-
-**Step 3** — add `inbox/` to `.gitignore` if you don't want to commit LinkedIn content.
+Date format: `YYYY-MM-DD`.
 
 ---
 
