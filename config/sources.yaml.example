@@ -1,0 +1,23 @@
+# Weekly Digest Sources
+# Copy this file to sources.yaml and fill in your own sources.
+
+substack:
+  - name: "Author Name"
+    feed: "https://authorname.substack.com/feed"
+  # - name: "Another Author"
+  #   feed: "https://anotherauthor.substack.com/feed"
+
+youtube:
+  # Get channel ID: go to channel page → view-source → search "channelId"
+  # Or use https://www.youtube.com/@handle/about and check the URL
+  # - name: "Channel Name"
+  #   channel_id: "UCxxxxxxxxxxxxxxxxxxxxxxxx"
+
+telegram:
+  # Public channel username (without @) OR numeric chat ID for private channels
+  # For private channels you must already be a member
+  # - name: "Channel Name"
+  #   username: "channel_username_here"
+
+# How many days back to look for new content
+lookback_days: 7

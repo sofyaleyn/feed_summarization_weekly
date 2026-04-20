@@ -3,3 +3,4 @@ summaries/
 *.session*
 .env
 __pycache__/
+config/sources.yaml

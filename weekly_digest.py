@@ -36,11 +36,23 @@ PROMPT_FILE  = ROOT / "config" / "prompt_template.txt"
 STATE_FILE   = ROOT / "state" / "seen.json"
 OUTPUT_DIR   = ROOT / "summaries"
 
+ALLOWED_SOURCES = {"substack", "youtube", "telegram", "inbox"}
+
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
-def load_config():
-    with open(CONFIG_FILE) as f:
+def load_config(path=None):
+    with open(path or CONFIG_FILE) as f:
         return yaml.safe_load(f)
+
+def uid_source(uid):
+    """Infer which source produced a uid — used for scoped --reset-seen."""
+    if uid.startswith("yt_"):
+        return "youtube"
+    if uid.startswith("tg_"):
+        return "telegram"
+    if "substack.com" in uid:
+        return "substack"
+    return "inbox"
 
 def load_prompt():
     return PROMPT_FILE.read_text()
@@ -356,15 +368,74 @@ def summarize(item, prompt_template, model="claude-sonnet-4-6"):
     return message.content[0].text
 
 
-def save_summary(item, text):
+def save_summary(item, text, subfolder=None):
     week_label = datetime.date.today().strftime("%Y-W%W")
     week_dir = OUTPUT_DIR / week_label
+    if subfolder:
+        week_dir = week_dir / subfolder
     week_dir.mkdir(parents=True, exist_ok=True)
     filename = safe_filename(item["title"], item["date"])
     out_path = week_dir / filename
     out_path.write_text(text, encoding="utf-8")
-    print(f"    ✓ Saved: {week_label}/{filename}")
+    label = f"{week_label}/{subfolder}/{filename}" if subfolder else f"{week_label}/{filename}"
+    print(f"    ✓ Saved: {label}")
     return out_path
+
+
+_KEYWORDS = [
+    "immun", "autoimm", "t cell", "t-cell", "b cell", "b-cell", "treg", "tcr", "bcr",
+    "antibody", "antigen", "vaccine", "cytokine", "chemokine", "interferon", "interleukin",
+    "car-t", "car t", "checkpoint", "adjuvant", "mhc", "hla",
+    "infect", "microb", "virus", "viral", "bacter", "patho", "parasit", "fungal",
+    "cancer", "oncolog", "tumor", "tumour", "metasta", "myeloid", "lymphoid",
+    "leukem", "lymphom", "neuro", "gene therapy", "cell therapy", "crispr",
+    "rna", "mrna", "dna", "sequencing", "omics", "genomic", "proteomic",
+    "transcriptomic", "metabolomic", "single-cell", "single cell",
+    "receptor", "ligand", "signaling", "signalling", "molecul", "enzyme",
+    "protein design", "therapeutic", "drug discovery", "drug design",
+    "small molecule", "biologic", "pharma", "biotech", "fda", "ema",
+    "clinical trial", "preclinical", "phase 1", "phase 2", "phase 3",
+    "translation", "biomarker", "bioinformat", "computational biology",
+    "ml for biology", "foundation model", "lab automation", "wet lab", "dry lab",
+    "high-throughput", "screening", "cell biology", "molecular biology",
+    "structural biology", "systems biology",
+]
+
+
+def keyword_filter(item):
+    haystack = (item["title"] + " " + item["content"][:500]).lower()
+    hit = next((k for k in _KEYWORDS if k in haystack), None)
+    if hit:
+        return {"relevance": "yes", "reason": f"keyword match: '{hit}'"}
+    return {"relevance": "no", "reason": "no keyword match"}
+
+
+def classify_relevance(item, model="claude-haiku-4-5-20251001"):
+    import json
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    snippet = item["content"][:500]
+    prompt = (
+        "You are a relevance filter for a science communicator specializing in immunology.\n"
+        "Relevant topics: immunology, T cells, Tregs, TCR/BCR, antibodies, vaccines, "
+        "cytokines, cancer immunology, cell/gene therapy, CRISPR, omics, single-cell, "
+        "biotech, drug discovery, clinical translation, ML for biology, lab tooling, "
+        "computational biology, structural/molecular/systems biology.\n\n"
+        f"Title: {item['title']}\n"
+        f"Opening: {snippet}\n\n"
+        'Reply with JSON only: {"relevance": "yes"|"maybe"|"no", "reason": "<one sentence>"}'
+    )
+    msg = client.messages.create(
+        model=model,
+        max_tokens=100,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return json.loads(msg.content[0].text)
+
+
+def log_skipped(item, reason):
+    log_path = ROOT / "skipped.log"
+    with open(log_path, "a") as f:
+        f.write(f"{item['date']} | {item['source_name']} | {item['title']} | {reason}\n")
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
@@ -377,7 +448,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be processed without calling the API")
     parser.add_argument("--reset-seen", action="store_true",
-                        help="Clear seen-items state (will re-process everything)")
+                        help="Clear seen-items state (scoped to --sources/--only if given)")
     parser.add_argument("--batch", metavar="FOLDER",
                         help="Process all .pdf/.txt/.md files in a folder")
     parser.add_argument("--since", metavar="DATE",
@@ -385,20 +456,48 @@ def main():
     parser.add_argument("--model", default="claude-sonnet-4-6",
                         choices=["claude-haiku-4-5-20251001", "claude-sonnet-4-6"],
                         help="Claude model to use (default: sonnet)")
+    parser.add_argument("--config", metavar="PATH",
+                        help="Alternative sources YAML config (default: config/sources.yaml)")
+    parser.add_argument("--sources", metavar="LIST",
+                        help=f"Comma-separated sources to process: {', '.join(sorted(ALLOWED_SOURCES))}. "
+                             "inbox/ is always processed when present.")
+    parser.add_argument("--only", metavar="SOURCE",
+                        help="Shorthand for --sources with a single source")
+    parser.add_argument("--filter-mode", choices=["llm", "keyword", "off"], default="llm",
+                        help="Relevance filter: llm (default, uses Haiku), keyword (no API), off")
     args = parser.parse_args()
+
+    # Resolve active source filter
+    if args.only and args.sources:
+        parser.error("--only and --sources are mutually exclusive")
+    raw = args.only or args.sources
+    if raw:
+        active_sources = {s.strip().lower() for s in raw.split(",")}
+        unknown = active_sources - ALLOWED_SOURCES
+        if unknown:
+            parser.error(f"Unknown source(s): {', '.join(sorted(unknown))}. "
+                         f"Allowed: {', '.join(sorted(ALLOWED_SOURCES))}")
+    else:
+        active_sources = ALLOWED_SOURCES  # all
 
     if not args.auto and not args.manual and not args.batch:
         parser.print_help()
         sys.exit(0)
 
-    if args.reset_seen:
-        save_state({"seen": []})
-        print("State reset.")
-
-    config  = load_config()
+    config  = load_config(args.config)
     prompt  = load_prompt()
     state   = load_state()
     items   = []
+
+    if args.reset_seen:
+        if active_sources == ALLOWED_SOURCES:
+            save_state({"seen": []})
+            print("State reset (all sources).")
+        else:
+            state["seen"] = [uid for uid in state["seen"]
+                             if uid_source(uid) not in active_sources]
+            save_state(state)
+            print(f"State reset for: {', '.join(sorted(active_sources))}.")
 
     if args.since:
         try:
@@ -413,11 +512,11 @@ def main():
 
     if args.auto:
         print("\n── Auto sources ──────────────────────────────────────")
-        if config.get("substack"):
+        if "substack" in active_sources and config.get("substack"):
             items += fetch_substack(config["substack"], state, lookback)
-        if config.get("youtube"):
+        if "youtube" in active_sources and config.get("youtube"):
             items += fetch_youtube(config["youtube"], state, lookback)
-        if config.get("telegram"):
+        if "telegram" in active_sources and config.get("telegram"):
             items += fetch_telegram(config["telegram"], state, lookback)
 
     if args.manual:
@@ -442,8 +541,26 @@ def main():
     for item in items:
         print(f"  → {item['title'][:70]}")
         try:
+            if args.filter_mode == "llm":
+                verdict = classify_relevance(item)
+            elif args.filter_mode == "keyword":
+                verdict = keyword_filter(item)
+            else:
+                verdict = {"relevance": "yes", "reason": "filter off"}
+
+            rel = verdict["relevance"]
+            if rel == "no":
+                print(f"    ✗ Skipped ({verdict['reason']})")
+                log_skipped(item, verdict["reason"])
+                mark_seen(state, item["uid"])
+                continue
+
+            subfolder = "maybe" if rel == "maybe" else None
+            if subfolder:
+                print(f"    ~ maybe ({verdict['reason']})")
+
             summary = summarize(item, prompt, args.model)
-            path = save_summary(item, summary)
+            path = save_summary(item, summary, subfolder=subfolder)
             saved_paths.append(path)
             mark_seen(state, item["uid"])
         except Exception as e:
