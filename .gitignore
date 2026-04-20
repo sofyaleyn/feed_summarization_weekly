@@ -4,3 +4,8 @@ summaries/
 .env
 __pycache__/
 config/sources.yaml
+inbox/*
+!inbox/.gitkeep
+logs/
+skipped.log
+maybe/

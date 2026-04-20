@@ -352,19 +352,22 @@ def fetch_batch(folder):
 
 def summarize(item, prompt_template, model="claude-sonnet-4-6"):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    safe_content = item["content"].replace("{", "{{").replace("}", "}}")
     prompt = prompt_template.format(
         title=item["title"],
         source_name=item["source_name"],
         content_type=item["content_type"],
         date=item["date"],
         link=item["link"],
-        content=item["content"],
+        content=safe_content,
     )
     message = client.messages.create(
         model=model,
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
+    if not message.content:
+        raise ValueError(f"Empty response from API (stop_reason={message.stop_reason})")
     return message.content[0].text
 
 
@@ -429,7 +432,11 @@ def classify_relevance(item, model="claude-haiku-4-5-20251001"):
         max_tokens=100,
         messages=[{"role": "user", "content": prompt}],
     )
-    return json.loads(msg.content[0].text)
+    text = msg.content[0].text
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match:
+        return {"relevance": "maybe", "reason": "classifier returned unparseable response"}
+    return json.loads(match.group())
 
 
 def log_skipped(item, reason):
