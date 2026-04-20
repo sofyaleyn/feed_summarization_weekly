@@ -26,6 +26,7 @@ from pathlib import Path
 import requests
 import feedparser
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 import anthropic
 
 # ── PATHS ─────────────────────────────────────────────────────────────────────
@@ -36,7 +37,10 @@ PROMPT_FILE  = ROOT / "config" / "prompt_template.txt"
 STATE_FILE   = ROOT / "state" / "seen.json"
 OUTPUT_DIR   = ROOT / "summaries"
 
-ALLOWED_SOURCES = {"substack", "youtube", "telegram", "inbox"}
+ALLOWED_SOURCES = {"substack", "youtube", "telegram", "inbox", "scraped_pages", "journals"}
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -46,10 +50,14 @@ def load_config(path=None):
 
 def uid_source(uid):
     """Infer which source produced a uid — used for scoped --reset-seen."""
+    if uid.startswith("jr_"):
+        return "journals"
     if uid.startswith("yt_"):
         return "youtube"
     if uid.startswith("tg_"):
         return "telegram"
+    if uid.startswith("sp_"):
+        return "scraped_pages"
     if "substack.com" in uid:
         return "substack"
     return "inbox"
@@ -212,7 +220,14 @@ def fetch_telegram(sources, state, lookback_days):
     session_path = str(ROOT / "state" / "telegram_session")
     cutoff = days_ago(lookback_days)
 
-    with TelegramClient(session_path, int(tg_id), tg_hash) as client:
+    try:
+        client_ctx = TelegramClient(session_path, int(tg_id), tg_hash)
+        client_ctx.start()
+    except Exception as e:
+        print(f"  ✗ Telegram connection failed: {e}")
+        return []
+
+    with client_ctx as client:
         for source in sources:
             print(f"  Checking Telegram: {source['name']}")
             try:
@@ -241,6 +256,80 @@ def fetch_telegram(sources, state, lookback_days):
                     "content": msg.text[:14000],
                 })
                 print(f"    + post {msg.id} ({msg.date.strftime('%Y-%m-%d')})")
+    return items
+
+
+def _scrape_article_body(url):
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        for sel in [
+            "div.documentContent", "div.article-body", "div.news-body",
+            "article", "main", "div#content",
+        ]:
+            body = soup.select_one(sel)
+            if body:
+                return body.get_text(separator="\n", strip=True)[:12000]
+    except Exception:
+        pass
+    return None
+
+
+def fetch_scraped_pages(sources, state, lookback_days):
+    items = []
+    cutoff = days_ago(lookback_days)
+    for source in sources:
+        print(f"  Checking scraped page: {source['name']}")
+        try:
+            r = requests.get(source["url"], timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    ✗ Fetch error: {e}")
+            continue
+        soup = BeautifulSoup(r.text, "html.parser")
+        selector = source.get("link_selector", "a")
+        links = soup.select(selector)
+        if not links:
+            print(f"    ⚠ No links matched selector '{selector}' — check HTML and update sources.yaml")
+            continue
+        found = 0
+        for a in links:
+            href = a.get("href", "")
+            if not href or href.startswith("mailto:") or href.startswith("#"):
+                continue
+            url = urljoin(source["url"], href)
+            uid = f"sp_{url}"
+            if is_seen(state, uid):
+                continue
+            title = a.get_text(strip=True)
+            if not title:
+                continue
+            pub = None
+            date_pattern = source.get("date_pattern", "%d %B %Y")
+            for candidate in a.parent.stripped_strings:
+                try:
+                    pub = datetime.datetime.strptime(candidate.strip(), date_pattern)
+                    break
+                except ValueError:
+                    pass
+            if pub and pub < cutoff:
+                continue
+            content = _scrape_article_body(url)
+            items.append({
+                "uid": uid,
+                "title": title,
+                "link": url,
+                "source_name": source["name"],
+                "content_type": "Web article",
+                "date": pub.strftime("%Y-%m-%d") if pub else datetime.date.today().isoformat(),
+                "content": content or title,
+            })
+            print(f"    + {title[:70]}")
+            found += 1
+        if found == 0:
+            print(f"    ⚠ No new items found (selector matched {len(links)} links but none were new/in-window)")
     return items
 
 
@@ -331,21 +420,233 @@ def fetch_manual(inputs):
 
     return items
 
-def fetch_batch(folder):
-    """Process all .pdf/.txt/.md files in a folder."""
+def extract_from_screenshot(image_path):
+    """Use Haiku vision to extract author, text, and date from a LinkedIn screenshot."""
+    import base64
+    path = Path(image_path)
+    media_type = MEDIA_TYPES.get(path.suffix.lstrip(".").lower(), "image/jpeg")
+    data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1000,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+                {"type": "text", "text": (
+                    "This is a LinkedIn post screenshot. Extract:\n"
+                    "1) Author full name\n"
+                    "2) Full post text\n"
+                    "3) Date if visible\n\n"
+                    'Reply with JSON only: {"author": "...", "text": "...", "date": "YYYY-MM-DD or empty"}'
+                )},
+            ],
+        }],
+    )
+    raw = msg.content[0].text
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if not match:
+        return {"author": "", "text": "", "date": ""}
+    return json.loads(match.group())
+
+
+def _group_images_by_consecutive_number(image_files):
+    """Group images whose filenames have consecutive trailing numbers.
+
+    e.g. IMG_1234, IMG_1235, IMG_1236 → one group; IMG_1240 → new group.
+    Files with no number sort last and each become their own group.
+    """
+    def trailing_number(f):
+        nums = re.findall(r'\d+', f.stem)
+        return int(nums[-1]) if nums else None
+
+    numbered = sorted(
+        [(trailing_number(f), f) for f in image_files if trailing_number(f) is not None],
+        key=lambda x: x[0]
+    )
+    unnumbered = [f for f in image_files if trailing_number(f) is None]
+
+    groups = []
+    current = []
+    for num, f in numbered:
+        if current and num != trailing_number(current[-1]) + 1:
+            groups.append(current)
+            current = []
+        current.append(f)
+    if current:
+        groups.append(current)
+    for f in unnumbered:
+        groups.append([f])
+    return groups
+
+
+def fetch_batch(folder, state):
+    """Process .pdf/.txt/.md files and LinkedIn screenshots in a folder.
+
+    Top-level images are grouped by minute (same-minute = one multi-part post).
+    Subfolders of images are each treated as one post (manual override).
+    """
     folder_path = Path(folder)
     if not folder_path.is_dir():
         print(f"  ✗ Not a directory: {folder}")
         return []
-    files = sorted(
-        f for f in folder_path.iterdir()
-        if f.suffix in (".pdf", ".txt", ".md") and f.is_file()
-    )
-    if not files:
-        print(f"  ⚠ No .pdf/.txt/.md files found in {folder}")
+
+    text_files = sorted(f for f in folder_path.iterdir()
+                        if f.is_file() and f.suffix in (".pdf", ".txt", ".md"))
+    top_images = [f for f in folder_path.iterdir()
+                  if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS]
+    image_subdirs = sorted(d for d in folder_path.iterdir()
+                           if d.is_dir() and any(
+                               f.suffix.lower() in IMAGE_EXTENSIONS
+                               for f in d.iterdir() if f.is_file()))
+
+    if not text_files and not top_images and not image_subdirs:
+        print(f"  ⚠ No processable files found in {folder}")
         return []
-    print(f"  Found {len(files)} file(s) in {folder}")
-    return fetch_manual([str(f) for f in files])
+
+    items = []
+
+    if text_files:
+        print(f"  Found {len(text_files)} text/PDF file(s)")
+        items += fetch_manual([str(f) for f in text_files])
+
+    for images in _group_images_by_consecutive_number(top_images):
+        uid = f"li_{images[0].stem}"
+        if is_seen(state, uid):
+            print(f"  [seen] {images[0].name}" + (f" (+{len(images)-1} more)" if len(images) > 1 else ""))
+            continue
+        label = f"{len(images)}-part post" if len(images) > 1 else "screenshot"
+        print(f"  Extracting {label}: {', '.join(f.name for f in images)}")
+        parts, author, date = [], None, None
+        for img in images:
+            extracted = extract_from_screenshot(img)
+            author = author or extracted.get("author") or None
+            date = date or extracted.get("date") or None
+            if extracted.get("text"):
+                parts.append(extracted["text"])
+        author = author or f"Unknown ({images[0].stem})"
+        content = f"Author: {author}\n\n" + "\n\n".join(parts)
+        items.append({
+            "uid": uid,
+            "title": f"LinkedIn post by {author}",
+            "link": str(images[0]),
+            "source_name": author,
+            "content_type": "LinkedIn post",
+            "date": date or datetime.date.today().isoformat(),
+            "content": content,
+        })
+
+    for subdir in image_subdirs:
+        uid = f"li_{subdir.name}"
+        if is_seen(state, uid):
+            print(f"  [seen] {subdir.name}/")
+            continue
+        images = sorted(f for f in subdir.iterdir()
+                        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS)
+        print(f"  Extracting {len(images)}-part post: {subdir.name}/")
+        parts, author, date = [], None, None
+        for img in images:
+            extracted = extract_from_screenshot(img)
+            author = author or extracted.get("author") or None
+            date = date or extracted.get("date") or None
+            if extracted.get("text"):
+                parts.append(extracted["text"])
+        author = author or f"Unknown ({subdir.name})"
+        content = f"Author: {author}\n\n" + "\n\n".join(parts)
+        items.append({
+            "uid": uid,
+            "title": f"LinkedIn post by {author}",
+            "link": str(subdir),
+            "source_name": author,
+            "content_type": "LinkedIn post",
+            "date": date or datetime.date.today().isoformat(),
+            "content": content,
+        })
+
+    return items
+
+
+def is_review(entry):
+    _REVIEW_KEYWORDS = {"review", "perspective", "overview", "primer"}
+    art_type = entry.get("celpress_articletype", "").lower()
+    if any(k in art_type for k in _REVIEW_KEYWORDS):
+        return True
+    tags = [getattr(t, "term", "").lower() for t in entry.get("tags", [])]
+    if any(k in tag for k in _REVIEW_KEYWORDS for tag in tags):
+        return True
+    return any(k in entry.get("title", "").lower() for k in _REVIEW_KEYWORDS)
+
+
+def try_fetch_fulltext(url):
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for selector in ["div.article__body", "div.c-article-body", "article"]:
+            el = soup.select_one(selector)
+            if el:
+                text = el.get_text(separator="\n", strip=True)
+                if len(text) > 200:
+                    return text[:12000]
+    except Exception:
+        pass
+    return None
+
+
+def fetch_journals(sources, state, lookback_days):
+    items = []
+    cutoff = days_ago(lookback_days)
+    for journal in sources:
+        name = journal["name"]
+        is_cell_press = bool(journal.get("rss_inpress") or journal.get("rss_current"))
+        feed_urls = [journal[k] for k in ("rss", "rss_inpress", "rss_current") if journal.get(k)]
+        seen_this_run: set = set()
+
+        for feed_url in feed_urls:
+            print(f"  Checking journal feed: {name}")
+            try:
+                feed = feedparser.parse(feed_url, agent="Mozilla/5.0")
+            except Exception as e:
+                print(f"    ✗ Feed error: {e}")
+                continue
+
+            for entry in feed.entries:
+                raw_id = entry.get("id") or entry.get("link", "")
+                uid = f"jr_{raw_id}"
+                if uid in seen_this_run or is_seen(state, uid):
+                    continue
+
+                parsed = entry.get("published_parsed")
+                if not parsed:
+                    continue
+                try:
+                    pub = datetime.datetime(*parsed[:6])
+                except Exception:
+                    continue
+                if pub < cutoff:
+                    continue
+
+                if is_cell_press and not is_review(entry):
+                    continue
+
+                content = try_fetch_fulltext(entry.get("link", ""))
+                if not content:
+                    content = re.sub(r"<[^>]+>", " ", entry.get("summary", "")).strip()
+
+                items.append({
+                    "uid": uid,
+                    "title": entry.get("title", "(no title)"),
+                    "link": entry.get("link", ""),
+                    "source_name": name,
+                    "content_type": "Journal review",
+                    "date": pub.strftime("%Y-%m-%d"),
+                    "content": content,
+                })
+                seen_this_run.add(uid)
+                print(f"    + {entry.get('title', '')[:70]}")
+
+    return items
 
 
 # ── SUMMARIZER ────────────────────────────────────────────────────────────────
@@ -353,7 +654,10 @@ def fetch_batch(folder):
 def summarize(item, prompt_template, model="claude-sonnet-4-6"):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     safe_content = item["content"].replace("{", "{{").replace("}", "}}")
-    prompt = prompt_template.format(
+    template = prompt_template
+    if item.get("content_type") == "Journal review":
+        template = prompt_template + JOURNAL_PROMPT_ADDENDUM
+    prompt = template.format(
         title=item["title"],
         source_name=item["source_name"],
         content_type=item["content_type"],
@@ -403,6 +707,18 @@ _KEYWORDS = [
     "high-throughput", "screening", "cell biology", "molecular biology",
     "structural biology", "systems biology",
 ]
+
+
+JOURNAL_PROMPT_ADDENDUM = """
+
+---
+
+If this is a published journal review or perspective:
+- Identify the review's scope: which biological system, disease, or technology is being synthesized
+- Note which findings are well-established consensus vs. actively debated
+- Flag if the review proposes a new model, framework, or taxonomy
+- For blog angles: focus on hooks useful for an immunology-specialist audience
+"""
 
 
 def keyword_filter(item):
@@ -519,12 +835,19 @@ def main():
 
     if args.auto:
         print("\n── Auto sources ──────────────────────────────────────")
-        if "substack" in active_sources and config.get("substack"):
-            items += fetch_substack(config["substack"], state, lookback)
-        if "youtube" in active_sources and config.get("youtube"):
-            items += fetch_youtube(config["youtube"], state, lookback)
-        if "telegram" in active_sources and config.get("telegram"):
-            items += fetch_telegram(config["telegram"], state, lookback)
+        for src_name, fetcher, cfg_key in [
+            ("substack",      fetch_substack,      "substack"),
+            ("youtube",       fetch_youtube,       "youtube"),
+            ("telegram",      fetch_telegram,      "telegram"),
+            ("scraped_pages", fetch_scraped_pages, "scraped_pages"),
+            ("journals",      fetch_journals,      "journals"),
+        ]:
+            if src_name not in active_sources or not config.get(cfg_key):
+                continue
+            try:
+                items += fetcher(config[cfg_key], state, lookback)
+            except Exception as e:
+                print(f"  ✗ {src_name} fetcher crashed: {e}")
 
     if args.manual:
         print("\n── Manual inputs ─────────────────────────────────────")
@@ -532,7 +855,7 @@ def main():
 
     if args.batch:
         print(f"\n── Batch folder: {args.batch} ────────────────────────")
-        items += fetch_batch(args.batch)
+        items += fetch_batch(args.batch, state)
 
     if not items:
         print("\nNothing new to summarize.")

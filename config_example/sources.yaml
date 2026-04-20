@@ -1,0 +1,44 @@
+# Weekly Digest Sources
+# Copy this file to sources.yaml and fill in your own sources.
+
+substack:
+  - name: "Author Name"
+    feed: "https://authorname.substack.com/feed"
+  # - name: "Another Author"
+  #   feed: "https://anotherauthor.substack.com/feed"
+
+youtube:
+  # Get channel ID: go to channel page → view-source → search "channelId"
+  # Or use https://www.youtube.com/@handle/about and check the URL
+  # - name: "Channel Name"
+  #   channel_id: "UCxxxxxxxxxxxxxxxxxxxxxxxx"
+
+telegram:
+  # Public channel username (without @) OR numeric chat ID for private channels
+  # For private channels you must already be a member
+  # - name: "Channel Name"
+  #   username: "channel_username_here"
+
+scraped_pages:
+  # For sites with no RSS feed. Check <head> for hidden feeds before adding here.
+  # Selector verification: run in Python shell:
+  #   import requests; from bs4 import BeautifulSoup
+  #   r = requests.get("URL", headers={"User-Agent": "Mozilla/5.0"})
+  #   for a in BeautifulSoup(r.text, "html.parser").find_all("a", href=True):
+  #       print(a["href"], "|", a.get_text(strip=True)[:60])
+  # - name: "Oxford Immunology Network"
+  #   url: "https://www.immunology.ox.ac.uk/news"
+  #   link_selector: "h2 a"        # CSS selector for article links
+  #   date_pattern: "%d %B %Y"     # strptime format matching page date strings
+
+journals:
+  # Cell Press journals: filter to reviews/perspectives only (via RSS article-type metadata)
+  # - name: "Immunity"
+  #   rss_inpress: "https://www.cell.com/immunity/inpress.rss"
+  #   rss_current: "https://www.cell.com/immunity/current.rss"
+  # Nature Reviews journals: all entries are reviews, no filtering needed
+  # - name: "Nature Reviews Immunology"
+  #   rss: "https://www.nature.com/nri.rss"
+
+# How many days back to look for new content
+lookback_days: 7

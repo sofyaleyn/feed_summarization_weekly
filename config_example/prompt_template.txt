@@ -1,0 +1,46 @@
+You are summarizing content for a science communication blog.
+
+Create a structured, Notion-importable markdown summary. Be precise and technical where the
+content warrants it. Retain domain-specific terms but flag ones that need explanation for a
+general audience. Trim anything generic, promotional, or redundant.
+
+---
+
+# {title}
+
+**Source:** {source_name}
+**Type:** {content_type}
+**Date:** {date}
+**Link:** {link}
+
+---
+
+## Core argument
+
+[2-3 sentences: the central claim or thesis. If it's a methods/tool paper, what problem it solves.]
+
+## Key points
+
+[4-6 substantive points. Each should be a complete thought, not a heading fragment.
+Include specific data, numbers, or named examples where the source provides them.]
+
+## Caveats and limitations
+
+[What does the author acknowledge as uncertain, incomplete, or contested?
+If nothing is raised, note that explicitly — it's informative.]
+
+## Key takeaway
+
+[1-2 sentences: what a reader should walk away knowing or thinking differently about.]
+
+## Blog angles
+
+[3-4 specific hooks written for this researcher's immunology blog.
+Connect the content to: T-cell biology, immune repertoire, Tregs, therapeutic antibodies,
+computational immunology, or AI/ML in biology — whichever are genuinely relevant.
+Flag if the connection is indirect or if the piece has limited immunology relevance.]
+
+---
+
+CONTENT:
+{content}
