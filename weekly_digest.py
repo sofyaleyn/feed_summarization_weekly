@@ -788,6 +788,10 @@ def main():
                         help="Shorthand for --sources with a single source")
     parser.add_argument("--filter-mode", choices=["llm", "keyword", "off"], default="llm",
                         help="Relevance filter: llm (default, uses Haiku), keyword (no API), off")
+    parser.add_argument("--dry-run-json", metavar="PATH",
+                        help="With --dry-run: write found items as JSON to PATH")
+    parser.add_argument("--uid-filter", metavar="UIDS",
+                        help="Comma-separated UIDs; skip items not in this list")
     args = parser.parse_args()
 
     # Resolve active source filter
@@ -857,14 +861,26 @@ def main():
         print(f"\n── Batch folder: {args.batch} ────────────────────────")
         items += fetch_batch(args.batch, state)
 
+    if args.uid_filter:
+        allowed_uids = {u.strip() for u in args.uid_filter.split(",") if u.strip()}
+        items = [it for it in items if it["uid"] in allowed_uids]
+
     if not items:
         print("\nNothing new to summarize.")
         return
 
     print(f"\n── Summarizing {len(items)} item(s) ──────────────────────")
     if args.dry_run:
-        for item in items:
-            print(f"  [DRY RUN] Would summarize: {item['title'][:70]}")
+        for i, item in enumerate(items, 1):
+            print(f"  [{i}] {item['source_name']} | {item['date']} | {item['title'][:70]}")
+        if args.dry_run_json:
+            preview = [
+                {"index": i, "uid": it["uid"], "title": it["title"],
+                 "source_name": it["source_name"], "date": it["date"], "link": it["link"]}
+                for i, it in enumerate(items, 1)
+            ]
+            Path(args.dry_run_json).write_text(json.dumps(preview, indent=2))
+            print(f"  → Item list saved to {args.dry_run_json}")
         return
 
     saved_paths = []
