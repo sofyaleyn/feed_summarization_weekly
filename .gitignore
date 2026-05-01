@@ -3,9 +3,12 @@ summaries/
 *.session*
 .env
 __pycache__/
-config/sources.yaml
+config/
 inbox/*
 !inbox/.gitkeep
+linkedin_inbox/*
+!linkedin_inbox/.gitkeep
 logs/
 skipped.log
 maybe/
+CLAUDE.md
