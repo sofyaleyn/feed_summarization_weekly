@@ -83,7 +83,7 @@ def is_seen(state, uid):
     return uid in state["seen"]
 
 def days_ago(n):
-    return datetime.datetime.utcnow() - datetime.timedelta(days=n)
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=n)
 
 def clean_html(html_text, max_chars=14000):
     soup = BeautifulSoup(html_text, "html.parser")
@@ -617,7 +617,7 @@ def fetch_journals(sources, state, lookback_days):
                 if uid in seen_this_run or is_seen(state, uid):
                     continue
 
-                parsed = entry.get("published_parsed")
+                parsed = entry.get("published_parsed") or entry.get("updated_parsed")
                 if not parsed:
                     continue
                 try:
